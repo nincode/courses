@@ -1,6 +1,7 @@
 from __future__ import division,print_function
+from importlib import reload
 import math, os, json, sys, re
-import cPickle as pickle
+import _pickle as pickle
 from glob import glob
 import numpy as np
 from matplotlib import pyplot as plt
@@ -25,31 +26,33 @@ from sklearn.manifold import TSNE
 
 from IPython.lib.display import FileLink
 
-import theano
-from theano import shared, tensor as T
-from theano.tensor.nnet import conv2d, nnet
-from theano.tensor.signal import pool
+# import theano
+# from theano import shared, tensor as T
+# from theano.tensor.nnet import conv2d, nnet
+# from theano.tensor.signal import pool
 
-import keras
-from keras import backend as K
-from keras.utils.data_utils import get_file
-from keras.utils import np_utils
-from keras.utils.np_utils import to_categorical
-from keras.models import Sequential, Model
-from keras.layers import Input, Embedding, Reshape, merge, LSTM, Bidirectional
-from keras.layers import TimeDistributed, Activation, SimpleRNN, GRU
-from keras.layers.core import Flatten, Dense, Dropout, Lambda
-from keras.regularizers import l2, activity_l2, l1, activity_l1
-from keras.layers.normalization import BatchNormalization
-from keras.optimizers import SGD, RMSprop, Adam
-from keras.utils.layer_utils import layer_from_config
-from keras.metrics import categorical_crossentropy, categorical_accuracy
-from keras.layers.convolutional import *
-from keras.preprocessing import image, sequence
-from keras.preprocessing.text import Tokenizer
+# import keras
+from tensorflow import keras as K
+
+# from keras import backend as K
+# from keras.utils.data_utils import get_file
+# from keras.utils import np_utils
+# from keras.utils.np_utils import to_categorical
+from tensorflow.python.keras.models import Sequential, Model
+# from keras.layers import Input, Embedding, Reshape, merge, LSTM, Bidirectional
+# from keras.layers import TimeDistributed, Activation, SimpleRNN, GRU
+# from keras.layers.core import Flatten, Dense, Dropout, Lambda
+# from keras.regularizers import l2, activity_l2, l1, activity_l1
+# from keras.layers.normalization import BatchNormalization
+# from keras.optimizers import SGD, RMSprop, Adam
+# from keras.utils.layer_utils import layer_from_config
+# from keras.metrics import categorical_crossentropy, categorical_accuracy
+# from keras.layers.convolutional import *
+# from keras.preprocessing import image, sequence
+# from keras.preprocessing.text import Tokenizer
 
 from vgg16 import *
-from vgg16bn import *
+# from vgg16bn import *
 np.set_printoptions(precision=4, linewidth=100)
 
 
