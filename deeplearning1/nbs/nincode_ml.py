@@ -17,7 +17,6 @@ from tensorflow.python.keras.applications import VGG16
 from tensorflow.python.keras.models import Model
 from tensorflow.python.keras.models import Sequential, Model
 from tensorflow.python.keras.layers import Dense, Flatten, Lambda, Dropout, BatchNormalization, ZeroPadding2D, Convolution2D, GlobalAveragePooling2D
-from tensorflow.python.keras.optimizers import SGD, RMSprop, Adam
 # from keras.layers.pooling import GlobalAveragePooling2D
 from tensorflow.python.keras.optimizers import SGD, RMSprop, Adam
 # from keras.preprocessing import image
@@ -28,53 +27,134 @@ from tensorflow.python.keras.preprocessing import image
 # K.backend.set_image_dim_ordering('th')
 K.backend.set_image_data_format('channels_last')
 
-def create_model():
-    vgg = VGG16(input_shape=(224,224,3), include_top=True, weights='imagenet')
-    vgg.trainable = False
-    layer_block5_conv3 = vgg.get_layer(name='block5_conv3')    # Last 14x14 block
+class NincodeUtils():
+    def __init__(self):
+        if os.path.exists("c:/"):
+            path='d:/temp/ml/nincode/'
+        else:
+            path = "/home/relja/data/nincode/"
+        os.makedirs(path, exist_ok=True)
+        print("NincodeUtils configured to {0}".format(path))
 
-    vgg2 = Model(inputs=vgg.input, outputs=layer_block5_conv3.output)
+NU = NincodeUtils();
 
-    top_model = Sequential()
-    top_model.add(Lambda(vgg_preprocess,input_shape=(224,224,3)))
-    top_model.add(vgg2)
-    top_model.layers[1].trainable=False
-    return top_model
+class DataBatch2(image.ImageDataGenerator):
+    def __init__(self, path, batch_size=32):
+        super().__init__()
+        self.load(path,batch_size=batch_size)
 
-def add_extra_layers(class_num=2):
-    model_small = Sequential()
-    model_small.add(ZeroPadding2D((2,2), input_shape=(14, 14, 512)))
-    model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu'))
-    model_small.add(BatchNormalization())
-    model_small.add(Dropout(0.5))
+    def load(self, path,batch_size=32):
+        x = self.flow_from_directory(path, target_size=(224,224), class_mode='categorical', shuffle=True, batch_size=batch_size)
+        self.dir_iter = x
+        self.batch_size=32
+        self.file_count=len(self.dir_iter.filenames)
+        return x
 
-    model_small.add(ZeroPadding2D((2,2)))
-    model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu'))
-    model_small.add(BatchNormalization())
-    model_small.add(Dropout(0.5))
+    def step_count(self):
+        return int(self.file_count/self.batch_size + 1)
+        
+class DataBatch():
+    def __init__(self, path, batch_size=32):
+        self.load(path,batch_size=batch_size)
 
-    model_small.add(ZeroPadding2D((2,2)))
-    model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu'))
-    model_small.add(BatchNormalization())
-    model_small.add(Dropout(0.5))
+    def load(self, path,batch_size=32):
+        self.image_data_generator = image.ImageDataGenerator()
+        x = self.image_data_generator.flow_from_directory(directory=path, target_size=(224,224), class_mode='categorical', shuffle=True, batch_size=batch_size)
+        self.iter = x
+        self.batch_size=32
+        self.file_count=len(self.iter.filenames)
+        return x
 
-    model_small.add(ZeroPadding2D((2,2)))
-    model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu'))
-    model_small.add(BatchNormalization())
-    model_small.add(Dropout(0.5))
+    def step_count(self):
+        return int(self.file_count/self.batch_size/10 + 1)
+        
 
-    model_small.add(GlobalAveragePooling2D())
-    model_small.add(Dropout(0.2))
-    model_small.add(Dense(class_num, activation='softmax'))
-    return model_small
 
-def combined_model():
-    base_model = create_model()
-    top_model = add_extra_layers()
-    new_model = Sequential()
-    new_model.add(base_model)
-    new_model.add(top_model)
-    return new_model
+vgg_mean = np.array([123.68, 116.779, 103.939], dtype=np.float32).reshape((1,1, 3))
+class Model1():
+    """ 
+    model - Sequential model. Feel free to inspect if needed.
+    """
+    @staticmethod
+    def vgg_preprocess(x):
+        # Preprocess images (RGB->BGR, subract means)
+        x = x - vgg_mean
+        return x[..., ::-1] # reverse axis rgb->bgr
+
+    def create_model_VGG16(self):
+        # Create a stock tf VGG16, prepended with an image processor
+        vgg = VGG16(input_shape=(224,224,3), include_top=True, weights='imagenet')
+        vgg.trainable = False
+        layer_block5_conv3 = vgg.get_layer(name='block5_conv3')    # Last 14x14 block
+
+        vgg2 = Model(inputs=vgg.input, outputs=layer_block5_conv3.output)
+
+        top_model = Sequential()
+        top_model.add(Lambda(self.vgg_preprocess,input_shape=(224,224,3)))
+        top_model.add(vgg2)
+        top_model.layers[1].trainable=False
+        return top_model
+
+    def create_model_top(self, class_num=2):
+        # Fun bits. Sits on top of VGG16. This is where we play.
+        model_small = Sequential()
+        model_small.add(ZeroPadding2D((2,2), input_shape=(14, 14, 512)))
+        model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu'))
+        model_small.add(BatchNormalization())
+        model_small.add(Dropout(0.5))
+
+        model_small.add(ZeroPadding2D((2,2)))
+        model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu'))
+        model_small.add(BatchNormalization())
+        model_small.add(Dropout(0.5))
+
+        model_small.add(ZeroPadding2D((2,2)))
+        model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu'))
+        model_small.add(BatchNormalization())
+        model_small.add(Dropout(0.5))
+
+        model_small.add(ZeroPadding2D((2,2)))
+        model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu'))
+        model_small.add(BatchNormalization())
+        model_small.add(Dropout(0.5))
+
+        model_small.add(GlobalAveragePooling2D())
+        model_small.add(Dropout(0.2))
+        model_small.add(Dense(class_num, activation='softmax'))
+        return model_small
+
+    def summary(self):
+        trainable_count = int(np.sum([K.backend.count_params(p) for p in set(self.model.trainable_weights)]))
+        non_trainable_count = int(np.sum([K.backend.count_params(p) for p in set(self.model.non_trainable_weights)]))
+
+        print('Total params        : {:12,}'.format(trainable_count + non_trainable_count))
+        print('Non-trainable params: {:12,}'.format(non_trainable_count))
+        print('Trainable params    : {:12,}'.format(trainable_count))
+
+    def create_model(self, class_num=2):
+        """Stick preprocessing, VGG16, and a custom top model together.
+        Args:
+            class_num(int) - number of classes to differentiate
+        Returns:
+            Sequential model
+        """
+        base_model = self.create_model_VGG16()
+        top_model = self.create_model_top(class_num=class_num)
+        new_model = Sequential()
+        new_model.add(base_model)
+        new_model.add(top_model)
+        self.model = new_model
+        self.summary()
+
+    def compile(self, lr=0.05):
+        self.model.compile(optimizer=Adam(lr=lr), loss='categorical_crossentropy', metrics=['accuracy'])
+        print("Model compiled")
+
+    def train(self, batch_train, batch_valid, callbacks=None):
+        return self.model.fit_generator(generator=batch_train.iter, steps_per_epoch=batch_train.step_count(), 
+                                 validation_data=batch_valid.iter, validation_steps=batch_valid.step_count(), 
+                                 callbacks=callbacks,
+                                 epochs=1)
  
 
 def save_array(fname, arr): 
@@ -86,19 +166,6 @@ def load_array(fname):
     print("Loading",fname)
     return bcolz.open('.bcolz/'+fname)[:]
 
-vgg_mean = np.array([123.68, 116.779, 103.939], dtype=np.float32).reshape((1,1, 3))
-def vgg_preprocess(x):
-    """
-        Subtracts the mean RGB value, and transposes RGB to BGR.
-        The mean RGB was computed on the image set used to train the VGG model.
-
-        Args: 
-            x: Image array (height x width x channels)
-        Returns:
-            Image array (height x width x transposed_channels)
-    """
-    x = x - vgg_mean
-    return x[..., ::-1] # reverse axis rgb->bgr
 
 
 class Vgg17():
