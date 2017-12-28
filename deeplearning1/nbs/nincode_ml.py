@@ -21,6 +21,7 @@ from tensorflow.python.keras.layers import Dense, Flatten, Lambda, Dropout, Batc
 from tensorflow.python.keras.optimizers import SGD, RMSprop, Adam
 # from keras.preprocessing import image
 from tensorflow.python.keras.preprocessing import image
+from tensorflow.python.keras._impl.keras import callbacks as cbks
 
 # In case we are going to use the TensorFlow backend we need to explicitly set the Theano image ordering
 # from keras import backend as K
@@ -30,29 +31,45 @@ K.backend.set_image_data_format('channels_last')
 class NincodeUtils():
     def __init__(self):
         if os.path.exists("c:/"):
-            path='d:/temp/ml/nincode/'
+            self.rootdir='d:/temp/ml/nincode/'
         else:
-            path = "/home/relja/data/nincode/"
-        os.makedirs(path, exist_ok=True)
-        print("NincodeUtils configured to {0}".format(path))
+            self.rootdir = "/home/relja/data/nincode/"
+        os.makedirs(self.rootdir, exist_ok=True)
+        print("NincodeUtils configured to {0}".format(self.rootdir))
+
+    def save_array(fname, arr): 
+        print("Saving",fname)
+        c=bcolz.carray(arr, rootdir='.bcolz/'+fname, mode='w')
+        c.flush()
+
+    def load_array(fname): 
+        print("Loading",fname)
+        return bcolz.open('.bcolz/'+fname)[:]
+        
+    def save_object(fname, obj):
+        try:
+            temp_name = fname+'.tmp'
+            backup_name = fname+'.bak'
+            with open(temp_name,'wb') as file:
+                pickle.dump(obj, file, pickle.HIGHEST_PROTOCOL)
+            if (os.path.exists(backup_name)):
+                os.remove(backup_name)
+            if (os.path.exists(fname)):
+                os.rename(fname, backup_name)
+            os.rename(temp_name, fname)
+        except IOError:
+            return None
+
+    def load_object(fname):
+        try:
+            with open(fname,'rb') as file:
+                x = pickle.load(file)
+            return x
+        except IOError:
+            return None
 
 NU = NincodeUtils();
 
-class DataBatch2(image.ImageDataGenerator):
-    def __init__(self, path, batch_size=32):
-        super().__init__()
-        self.load(path,batch_size=batch_size)
-
-    def load(self, path,batch_size=32):
-        x = self.flow_from_directory(path, target_size=(224,224), class_mode='categorical', shuffle=True, batch_size=batch_size)
-        self.dir_iter = x
-        self.batch_size=32
-        self.file_count=len(self.dir_iter.filenames)
-        return x
-
-    def step_count(self):
-        return int(self.file_count/self.batch_size + 1)
-        
 class DataBatch():
     def __init__(self, path, batch_size=32):
         self.load(path,batch_size=batch_size)
@@ -66,9 +83,32 @@ class DataBatch():
         return x
 
     def step_count(self):
-        return int(self.file_count/self.batch_size/10 + 1)
+        return 1
+#        return int(self.file_count/self.batch_size + 1)
         
+class TrainCallback(cbks.Callback):
+    def __init__(self):
+        self.totals = {}
+        self.seen = 0
 
+    def on_batch_end(self, batch, logs=None):
+        logs = logs or {}
+        batch_size = logs.get('size', 0)
+        self.seen += batch_size
+
+        for k, v in logs.items():
+            if k in self.totals:
+                self.totals[k] += v * batch_size
+            else:
+                self.totals[k] = v * batch_size
+        print(self.totals)
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is not None:
+            for k in self.params['metrics']:
+                if k in self.totals:
+                    # Make value available to next callbacks.
+                    logs[k] = self.totals[k] / self.seen
 
 vgg_mean = np.array([123.68, 116.779, 103.939], dtype=np.float32).reshape((1,1, 3))
 class Model1():
@@ -80,6 +120,9 @@ class Model1():
         # Preprocess images (RGB->BGR, subract means)
         x = x - vgg_mean
         return x[..., ::-1] # reverse axis rgb->bgr
+
+    def __init__(self, name):
+        self.name = name
 
     def create_model_VGG16(self):
         # Create a stock tf VGG16, prepended with an image processor
