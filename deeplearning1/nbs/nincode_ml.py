@@ -3,7 +3,12 @@ from __future__ import division, print_function
 import os, json
 from glob import glob
 import numpy as np
+import time
+import random
 import bcolz
+import pickle
+import copy
+from operator import itemgetter
 from scipy import misc, ndimage
 from scipy.ndimage.interpolation import zoom
 
@@ -27,6 +32,7 @@ from tensorflow.python.keras._impl.keras import callbacks as cbks
 # from keras import backend as K
 # K.backend.set_image_dim_ordering('th')
 K.backend.set_image_data_format('channels_last')
+default_batch_size = 16
 
 class NincodeUtils():
     def __init__(self):
@@ -34,8 +40,11 @@ class NincodeUtils():
             self.rootdir='d:/temp/ml/nincode/'
         else:
             self.rootdir = "/home/relja/data/nincode/"
-        os.makedirs(self.rootdir, exist_ok=True)
+        os.makedirs(self.get_filename('.'), exist_ok=True)
         print("NincodeUtils configured to {0}".format(self.rootdir))
+
+    def get_filename(self, fname):
+        return os.path.join(self.rootdir, fname)
 
     def save_array(fname, arr): 
         print("Saving",fname)
@@ -46,8 +55,10 @@ class NincodeUtils():
         print("Loading",fname)
         return bcolz.open('.bcolz/'+fname)[:]
         
-    def save_object(fname, obj):
+    def save_object(self, fname, obj):
         try:
+            fname = self.get_filename(fname)
+#            print("Saving object to", fname)
             temp_name = fname+'.tmp'
             backup_name = fname+'.bak'
             with open(temp_name,'wb') as file:
@@ -60,8 +71,10 @@ class NincodeUtils():
         except IOError:
             return None
 
-    def load_object(fname):
+    def load_object(self, fname):
         try:
+            fname = self.get_filename(fname)
+            print("Loading object from", fname)
             with open(fname,'rb') as file:
                 x = pickle.load(file)
             return x
@@ -71,25 +84,30 @@ class NincodeUtils():
 NU = NincodeUtils();
 
 class DataBatch():
-    def __init__(self, path, batch_size=32):
+    """ Abstracts loading batches from disk """
+    def __init__(self, path, batch_size=default_batch_size):
         self.load(path,batch_size=batch_size)
 
-    def load(self, path,batch_size=32):
+    def load(self, path,batch_size=default_batch_size):
         self.image_data_generator = image.ImageDataGenerator()
         x = self.image_data_generator.flow_from_directory(directory=path, target_size=(224,224), class_mode='categorical', shuffle=True, batch_size=batch_size)
         self.iter = x
-        self.batch_size=32
+        self.batch_size=batch_size
         self.file_count=len(self.iter.filenames)
         return x
 
     def step_count(self):
-        return 1
+        return 8
 #        return int(self.file_count/self.batch_size + 1)
         
 class TrainCallback(cbks.Callback):
-    def __init__(self):
+    # Internal only.
+    def __init__(self, epoch_history, filename_history, parent):
         self.totals = {}
         self.seen = 0
+        self.filename_history = filename_history
+        self.parent = parent
+        self.glogs = epoch_history
 
     def on_batch_end(self, batch, logs=None):
         logs = logs or {}
@@ -101,14 +119,35 @@ class TrainCallback(cbks.Callback):
                 self.totals[k] += v * batch_size
             else:
                 self.totals[k] = v * batch_size
-        print(self.totals)
+#        print(self.totals)
 
     def on_epoch_end(self, epoch, logs=None):
-        if logs is not None:
-            for k in self.params['metrics']:
-                if k in self.totals:
-                    # Make value available to next callbacks.
-                    logs[k] = self.totals[k] / self.seen
+        logs = copy.deepcopy(logs)
+        if 'val_loss' not in logs:
+            # This sure looks like a Keras bug. The callback arrived too early.
+            return
+        logs['timestamp'] = time.strftime("%y%m%d-%H%M%S")
+        logs['epoch'] = epoch
+        save_epoch = False
+
+        val_loss = logs['val_loss']
+        best_val_loss = 1000
+        if len(self.glogs) > 0:
+            best_val_loss = float(self.glogs[0]['val_loss'])
+            if val_loss < best_val_loss:
+                save_epoch = True
+        else:
+            save_epoch = True
+
+        if save_epoch:
+            self.glogs.append(logs)
+            self.glogs.sort(key=itemgetter('val_loss'), reverse=False)           
+
+            print('')
+            print("Best epoch, needs to be saved. Current:{0:.3f}  old_best:{1:.3f}".format(val_loss, best_val_loss))
+            self.parent.checkpoint_save(logs['timestamp'], val_loss)
+
+        self.parent._save_state()
 
 vgg_mean = np.array([123.68, 116.779, 103.939], dtype=np.float32).reshape((1,1, 3))
 class Model1():
@@ -123,6 +162,71 @@ class Model1():
 
     def __init__(self, name):
         self.name = name
+        self.folder_model = name       
+        os.makedirs(NU.get_filename(self.folder_model), exist_ok=True)
+        self.file_history = os.path.join(self.folder_model, "history.pkl")
+        self.history = NU.load_object(self.file_history) or []
+        if len(self.history) > 0:
+            print("Loaded history", self.file_history)
+        self.callback = TrainCallback(epoch_history=self.history, filename_history=self.file_history, parent=self)
+
+    def clear(self):
+        """ Reset history, delete disk checkpoints """
+        self.history = []
+        self.cleanup_checkpoints()
+        self._save_state()
+
+    def _save_state(self):
+        NU.save_object(self.file_history, self.history)
+
+    def cleanup_checkpoints(self):
+        checkpoints_to_keep = 3
+        # Build index
+        timestamp_index = {}
+        for k in self.history:
+            timestamp_index[k['timestamp']] = k
+
+        # Delete checkpoint files that are not tracked
+        # also build a list of files on disk (used for sorting later on)
+        val_loss_data = []
+        file_names = {}
+        path = NU.get_filename(self.folder_model)
+        for file in os.listdir(path):
+            if file.endswith(".checkpoint"):
+                fname = os.path.join(path, file)
+                key = file.split('_')[0]
+                if key in timestamp_index:
+                    file_names[key] = fname
+                    val_loss_data.append(timestamp_index[key])
+                else:
+                    print('Deleting unknown checkpoint', fname)
+                    os.remove(fname)
+                    print("timestamp_index")
+                    for k,v in timestamp_index.items(): print(k,v)
+                    print("history")
+                    for k in self.history: print(k)
+        val_loss_data.sort(key=itemgetter('val_loss'), reverse=False)
+
+#        print('Val loss data')
+#        for k in val_loss_data: print(k)
+
+        # Find items to delete based on val_loss
+        if len(val_loss_data) == 0:
+            max_val_loss = 0
+        else:
+            max_val_loss = val_loss_data[min(checkpoints_to_keep, len(val_loss_data) - 1)]['val_loss']   
+
+#        print('max_val_loss',max_val_loss)
+        for t in range(checkpoints_to_keep, len(val_loss_data)):
+            os.remove(file_names[val_loss_data[t]['timestamp']])
+            print('Deleting shitty checkpoint', file_names[val_loss_data[t]['timestamp']])
+
+    def checkpoint_save(self, timestamp, val_loss):
+        fname = os.path.join(self.folder_model,'{0}_{1:.3f}.checkpoint'.format(timestamp,val_loss))
+        fname = NU.get_filename(fname)
+        print("Saving model checkpoint to", fname)
+        self.model.save(fname, overwrite=True)
+        self.cleanup_checkpoints()
 
     def create_model_VGG16(self):
         # Create a stock tf VGG16, prepended with an image processor
@@ -193,11 +297,14 @@ class Model1():
         self.model.compile(optimizer=Adam(lr=lr), loss='categorical_crossentropy', metrics=['accuracy'])
         print("Model compiled")
 
-    def train(self, batch_train, batch_valid, callbacks=None):
+    def train(self, batch_train, batch_valid, callbacks=None, epochs=1):
+        callbacks = copy.copy(callbacks)
+        callbacks.append(self.callback)
+        self.cleanup_checkpoints()
         return self.model.fit_generator(generator=batch_train.iter, steps_per_epoch=batch_train.step_count(), 
                                  validation_data=batch_valid.iter, validation_steps=batch_valid.step_count(), 
                                  callbacks=callbacks,
-                                 epochs=1)
+                                 epochs=epochs)
  
 
 def save_array(fname, arr): 
