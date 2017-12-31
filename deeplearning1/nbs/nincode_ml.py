@@ -23,7 +23,7 @@ from tensorflow.python.keras.models import Model
 from tensorflow.python.keras.models import Sequential, Model
 from tensorflow.python.keras.layers import Dense, Flatten, Lambda, Dropout, BatchNormalization, ZeroPadding2D, Convolution2D, GlobalAveragePooling2D
 # from keras.layers.pooling import GlobalAveragePooling2D
-from tensorflow.python.keras.optimizers import SGD, RMSprop, Adam
+from tensorflow.python.keras.optimizers import SGD, RMSprop, Adam, Nadam
 # from keras.preprocessing import image
 from tensorflow.python.keras.preprocessing import image
 from tensorflow.python.keras._impl.keras import callbacks as cbks
@@ -74,7 +74,7 @@ class NincodeUtils():
     def load_object(self, fname):
         try:
             fname = self.get_filename(fname)
-            print("Loading object from", fname)
+#            print("Loading object from", fname)
             with open(fname,'rb') as file:
                 x = pickle.load(file)
             return x
@@ -97,7 +97,7 @@ class DataBatch():
         return x
 
     def step_count(self):
-        return 8
+        return 32
 #        return int(self.file_count/self.batch_size + 1)
         
 class TrainCallback(cbks.Callback):
@@ -124,7 +124,7 @@ class TrainCallback(cbks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         logs = copy.deepcopy(logs)
         if 'val_loss' not in logs:
-            # This sure looks like a Keras bug. The callback arrived too early.
+            # This sure looks like a Keras bug. The callback arrived before the end of the epoch.
             return
         logs['timestamp'] = time.strftime("%y%m%d-%H%M%S")
         logs['epoch'] = epoch
@@ -162,7 +162,8 @@ class Model1():
 
     def __init__(self, name):
         self.name = name
-        self.folder_model = name       
+        self.folder_model = name
+        self.checkpoint_data = []               
         os.makedirs(NU.get_filename(self.folder_model), exist_ok=True)
         self.file_history = os.path.join(self.folder_model, "history.pkl")
         self.history = NU.load_object(self.file_history) or []
@@ -172,12 +173,21 @@ class Model1():
 
     def clear(self):
         """ Reset history, delete disk checkpoints """
-        self.history = []
+        self.history.clear()
         self.cleanup_checkpoints()
         self._save_state()
 
     def _save_state(self):
         NU.save_object(self.file_history, self.history)
+
+    def restore_checkpoint(self):
+        self.cleanup_checkpoints()
+        if len(self.checkpoint_data) == 0:
+            print("No checkpoints found to restore")
+            return
+        print("Restoring {0}, with loss {1:.3f}".format(self.checkpoint_data[0]['filename'], self.checkpoint_data[0]['val_loss']))
+        self.model.load_weights(self.checkpoint_data[0]['filename'], by_name=True)
+#        self.model.load_weights(self.checkpoint_data[0]['filename'])
 
     def cleanup_checkpoints(self):
         checkpoints_to_keep = 3
@@ -188,7 +198,7 @@ class Model1():
 
         # Delete checkpoint files that are not tracked
         # also build a list of files on disk (used for sorting later on)
-        val_loss_data = []
+        self.checkpoint_data = []
         file_names = {}
         path = NU.get_filename(self.folder_model)
         for file in os.listdir(path):
@@ -197,7 +207,8 @@ class Model1():
                 key = file.split('_')[0]
                 if key in timestamp_index:
                     file_names[key] = fname
-                    val_loss_data.append(timestamp_index[key])
+                    timestamp_index[key]['filename']=fname
+                    self.checkpoint_data.append(timestamp_index[key])
                 else:
                     print('Deleting unknown checkpoint', fname)
                     os.remove(fname)
@@ -205,28 +216,49 @@ class Model1():
                     for k,v in timestamp_index.items(): print(k,v)
                     print("history")
                     for k in self.history: print(k)
-        val_loss_data.sort(key=itemgetter('val_loss'), reverse=False)
-
-#        print('Val loss data')
-#        for k in val_loss_data: print(k)
+        self.checkpoint_data.sort(key=itemgetter('val_loss'), reverse=False)
 
         # Find items to delete based on val_loss
-        if len(val_loss_data) == 0:
+        if len(self.checkpoint_data) == 0:
             max_val_loss = 0
         else:
-            max_val_loss = val_loss_data[min(checkpoints_to_keep, len(val_loss_data) - 1)]['val_loss']   
+            max_val_loss = self.checkpoint_data[min(checkpoints_to_keep, len(self.checkpoint_data) - 1)]['val_loss']   
 
-#        print('max_val_loss',max_val_loss)
-        for t in range(checkpoints_to_keep, len(val_loss_data)):
-            os.remove(file_names[val_loss_data[t]['timestamp']])
-            print('Deleting shitty checkpoint', file_names[val_loss_data[t]['timestamp']])
+        for t in range(checkpoints_to_keep, len(self.checkpoint_data)):
+            os.remove(file_names[self.checkpoint_data[t]['timestamp']])
+            print('Deleting inferior checkpoint', file_names[self.checkpoint_data[t]['timestamp']])
+        del self.checkpoint_data[checkpoints_to_keep:]
 
     def checkpoint_save(self, timestamp, val_loss):
         fname = os.path.join(self.folder_model,'{0}_{1:.3f}.checkpoint'.format(timestamp,val_loss))
         fname = NU.get_filename(fname)
         print("Saving model checkpoint to", fname)
-        self.model.save(fname, overwrite=True)
+        self.model.save_weights(fname, overwrite=True)
         self.cleanup_checkpoints()
+
+    def test(self, batch_valid):
+        return self.model.evaluate_generator(batch_valid.iter, batch_valid.step_count())
+
+    def flatten(self, model):
+        def proc(k, m2, override_trainable = True):
+            cfg = k.get_config()
+            trainable = True
+            if type(cfg) == dict:
+                name = cfg.get('name', 'None')
+                trainable = cfg.get('trainable', False)
+                
+            if type(k)!=Model and type(k)!=Sequential:
+                actual_trainable =  trainable & override_trainable
+#                print("{0:30} - {1} - {2}".format(name, trainable, actual_trainable))
+                k.trainable = actual_trainable
+                m2.add(k)
+            else:
+                for layer in k.layers:
+                    proc(layer, m2, trainable & override_trainable)
+                    
+        m2 = Sequential()
+        proc(model, m2)
+        return m2
 
     def create_model_VGG16(self):
         # Create a stock tf VGG16, prepended with an image processor
@@ -237,38 +269,29 @@ class Model1():
         vgg2 = Model(inputs=vgg.input, outputs=layer_block5_conv3.output)
 
         top_model = Sequential()
-        top_model.add(Lambda(self.vgg_preprocess,input_shape=(224,224,3)))
+        lbd = Lambda(self.vgg_preprocess,input_shape=(224,224,3),name="image_preprocess")
+        lbd.trainable = False
+        top_model.add(lbd)
         top_model.add(vgg2)
         top_model.layers[1].trainable=False
         return top_model
 
-    def create_model_top(self, class_num=2):
+    def add_conv_block(self, model_small, block_id, convolutions=512):
+        name="cblock_{0}".format(block_id)
+        model_small.add(ZeroPadding2D((2,2), name=name+"_padding"))
+        model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu', name=name+"_conv"))
+        model_small.add(BatchNormalization(name=name+"_batchnorm"))
+        model_small.add(Dropout(0.5, name=name+"_dropout"))
+        
+
+    def create_model_top(self, model, class_num=2):
         # Fun bits. Sits on top of VGG16. This is where we play.
-        model_small = Sequential()
-        model_small.add(ZeroPadding2D((2,2), input_shape=(14, 14, 512)))
-        model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu'))
-        model_small.add(BatchNormalization())
-        model_small.add(Dropout(0.5))
-
-        model_small.add(ZeroPadding2D((2,2)))
-        model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu'))
-        model_small.add(BatchNormalization())
-        model_small.add(Dropout(0.5))
-
-        model_small.add(ZeroPadding2D((2,2)))
-        model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu'))
-        model_small.add(BatchNormalization())
-        model_small.add(Dropout(0.5))
-
-        model_small.add(ZeroPadding2D((2,2)))
-        model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu'))
-        model_small.add(BatchNormalization())
-        model_small.add(Dropout(0.5))
-
-        model_small.add(GlobalAveragePooling2D())
-        model_small.add(Dropout(0.2))
-        model_small.add(Dense(class_num, activation='softmax'))
-        return model_small
+        for i in range(4):
+            self.add_conv_block(model, block_id=i)
+        
+        model.add(GlobalAveragePooling2D(name="top_global_average"))
+        model.add(Dropout(0.2, name="top_dropout"))
+        model.add(Dense(class_num, activation='softmax', name="top_output"))
 
     def summary(self):
         trainable_count = int(np.sum([K.backend.count_params(p) for p in set(self.model.trainable_weights)]))
@@ -286,18 +309,21 @@ class Model1():
             Sequential model
         """
         base_model = self.create_model_VGG16()
-        top_model = self.create_model_top(class_num=class_num)
         new_model = Sequential()
         new_model.add(base_model)
-        new_model.add(top_model)
+#        new_model.add(top_model)
+        new_model = self.flatten(new_model)
+        self.create_model_top(new_model, class_num=class_num)
         self.model = new_model
+        self.restore_checkpoint()
         self.summary()
 
-    def compile(self, lr=0.05):
-        self.model.compile(optimizer=Adam(lr=lr), loss='categorical_crossentropy', metrics=['accuracy'])
+    def compile(self):
+        self.model.compile(optimizer=Nadam(), loss='categorical_crossentropy', metrics=['accuracy'])
+#        self.model.compile(optimizer=Adam(lr=lr), loss='categorical_crossentropy', metrics=['accuracy'])
         print("Model compiled")
 
-    def train(self, batch_train, batch_valid, callbacks=None, epochs=1):
+    def train(self, batch_train, batch_valid, callbacks=[], epochs=1):
         callbacks = copy.copy(callbacks)
         callbacks.append(self.callback)
         self.cleanup_checkpoints()
@@ -404,8 +430,9 @@ class Vgg17():
             Returns:   None
         """
         model = self.model = Sequential()
-#        model.add(Lambda(vgg_preprocess, input_shape=(3,224,224), output_shape=(3,224,224)))
-        model.add(Lambda(vgg_preprocess, input_shape=(224,224, 3)))
+        preproc = Lambda(vgg_preprocess, input_shape=(224,224, 3))
+        preproc.Trainable = False
+        model.add(preproc)
 
         self.ConvBlock(2, 64)
         self.ConvBlock(2, 128)
