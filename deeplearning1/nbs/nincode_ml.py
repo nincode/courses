@@ -13,8 +13,6 @@ from scipy import misc, ndimage
 from scipy.ndimage.interpolation import zoom
 
 from tensorflow import keras as K
-# from keras import backend as K
-# from keras.layers.normalization import BatchNormalization
 from tensorflow.python.keras.utils import get_file
 from tensorflow.python.keras.layers import Concatenate
 from tensorflow.python.keras.layers import Lambda
@@ -22,19 +20,20 @@ from tensorflow.python.keras.applications import VGG16
 from tensorflow.python.keras.models import Model
 from tensorflow.python.keras.models import Sequential, Model
 from tensorflow.python.keras._impl.keras.preprocessing.image import Iterator
-from tensorflow.python.keras.layers import Dense, Flatten, Lambda, Dropout, BatchNormalization, ZeroPadding2D, Convolution2D, GlobalAveragePooling2D
-# from keras.layers.pooling import GlobalAveragePooling2D
+from tensorflow.python.keras.layers import Dense, Lambda, Dropout, BatchNormalization, ZeroPadding2D, Convolution2D, GlobalAveragePooling2D
 from tensorflow.python.keras.optimizers import SGD, RMSprop, Adam, Nadam
 from tensorflow.python.keras.preprocessing import image
 from tensorflow.python.keras._impl.keras import callbacks as cbks
 
-# In case we are going to use the TensorFlow backend we need to explicitly set the Theano image ordering
-# from keras import backend as K
-# K.backend.set_image_dim_ordering('th')
+# Example of precaching
+# cached_valid = m1.precache_batch(batches_valid)
+# cached_train = m1.precache_batch(batches_train)
+
 K.backend.set_image_data_format('channels_last')
-default_batch_size = 16
+default_batch_size = 32
 
 class NincodeUtils():
+    """ Common load/save, dealing with paths on Linux, Windows etc.  """
     def __init__(self):
         if os.path.exists("c:/"):
             self.rootdir='d:/temp/ml/nincode/'
@@ -78,7 +77,7 @@ class NincodeUtils():
             fname = self.get_filename(fname)
 #            print("Loading object from", fname)
             with open(fname,'rb') as file:
-                x = pickle.load(file)
+                x = pickle._load(file)
             return x
         except IOError:
             return None
@@ -107,7 +106,7 @@ class _CachedIterator(Iterator):
         return np.concatenate(batch_x), npy
 
 class DataBatch():
-    """ Abstracts loading batches from disk """
+    """ Abstracts loading batches from disk, handles cached and regular data """
     def __init__(self, path, name, batch_size=default_batch_size, always_use_full_batch=False):
         """ Params:
             path                  - d:\temp\dogscats 
@@ -122,9 +121,9 @@ class DataBatch():
         self.is_cached = False
         if name == 'valid' and self.always_use_full_batch == False:
             print("You probably want always_use_full_batch=True on validation batches")
-        self.load()
+        self._load()
 
-    def load_noncached(self):
+    def _load_noncached(self):
         self.is_cached = False
         self.image_data_generator = image.ImageDataGenerator()
         location = os.path.join(self.path, self.name)
@@ -136,8 +135,7 @@ class DataBatch():
         self.iter = x
         self.file_count=len(self.iter.filenames)
 
-    def load_cached(self, path_data, path_labels):
-        print("Loading cached")
+    def _load_cached(self, path_data, path_labels):
         self.is_cached = True
         self.cached_data = NU.load_array(path_data)
         self.cached_labels = NU.load_array(path_labels)
@@ -150,14 +148,14 @@ class DataBatch():
         NU.save_array(os.path.join(self.path, "cached_"+self.name+"_data"), data)
         NU.save_array(os.path.join(self.path, "cached_"+self.name+"_labels"), labels)
 
-    def load(self):
+    def _load(self):
         cached_name_data = os.path.join(self.path, "cached_"+self.name+"_data")
         cached_name_labels = os.path.join(self.path, "cached_"+self.name+"_labels")
         if os.path.exists(cached_name_data) and os.path.exists(cached_name_labels):
-            print("Found cached data: {0}. Load cached instead?".format(cached_name_data))
-            self.load_cached(cached_name_data, cached_name_labels)
+            print("Found cached data",cached_name_data)
+            self._load_cached(cached_name_data, cached_name_labels)
         else:
-            self.load_noncached()
+            self._load_noncached()
 
     def full_step_count(self):
         return int((self.iter.samples+self.iter.batch_size - 1)/self.batch_size)
@@ -166,9 +164,9 @@ class DataBatch():
         if self.always_use_full_batch:
             return self.full_step_count()
         else:
-            return 32
+            return self.full_step_count()/4
 
-class TrainCallback(cbks.Callback):
+class _TrainCallback(cbks.Callback):
     # Internal only.
     def __init__(self, epoch_history, filename_history, parent):
         self.totals = {}
@@ -213,7 +211,7 @@ class TrainCallback(cbks.Callback):
 
             print('')
             print("Best epoch, needs to be saved. Current:{0:.3f}  old_best:{1:.3f}".format(val_loss, best_val_loss))
-            self.parent.checkpoint_save(logs['timestamp'], val_loss)
+            self.parent._checkpoint_save(logs['timestamp'], val_loss)
 
         self.parent._save_state()
 
@@ -222,11 +220,6 @@ class Model1():
     """ 
     model - Sequential model. Feel free to inspect if needed.
     """
-    @staticmethod
-    def vgg_preprocess(x):
-        # Preprocess images (RGB->BGR, subract means)
-        x = x - vgg_mean
-        return x[..., ::-1] # reverse axis rgb->bgr
 
     def __init__(self, name):
         self.name = name
@@ -239,19 +232,77 @@ class Model1():
         self.history = NU.load_object(self.file_history) or []
         if len(self.history) > 0:
             print("Loaded history", self.file_history)
-        self.callback = TrainCallback(epoch_history=self.history, filename_history=self.file_history, parent=self)
+        self.callback = _TrainCallback(epoch_history=self.history, filename_history=self.file_history, parent=self)
 
     def clear(self):
         """ Reset history, delete disk checkpoints """
         self.history.clear()
-        self.cleanup_checkpoints()
+        self._cleanup_checkpoints()
         self._save_state()
 
-    def _save_state(self):
-        NU.save_object(self.file_history, self.history)
 
-    def restore_checkpoint(self):
-        self.cleanup_checkpoints()
+    def test(self, batch_valid):
+        if batch_valid.is_cached == True:
+            self._go_cached()
+            model = self.model_trainable
+        else:
+            model = self.model
+        ret = model.evaluate_generator(batch_valid.iter, batch_valid.step_count())
+        print("val_loss:{0:.4f}  val_acc:{1:.4f}".format(ret[0], ret[1]))
+        print(ret)
+
+    def compile(self):
+        self.model.compile(optimizer=Nadam(), loss='categorical_crossentropy', metrics=['accuracy'])
+        print("Model compiled")
+
+    def train(self, batch_train, batch_valid, callbacks=[], epochs=1):
+        if batch_valid.is_cached == True:
+            self._go_cached()
+            model = self.model_trainable
+        else:
+            model = self.model
+
+        callbacks = copy.copy(callbacks)
+        callbacks.append(self.callback)
+        self._cleanup_checkpoints()
+        ret = model.fit_generator(generator=batch_train.iter, steps_per_epoch=batch_train.step_count(), 
+                                 validation_data=batch_valid.iter, validation_steps=batch_valid.step_count(), 
+                                 callbacks=callbacks,
+                                 epochs=epochs)
+        return ret
+
+    def print_layers(self, model):
+        def proc(k):
+            cfg = k.get_config()
+            trainable = True
+            if type(cfg) == dict:
+                name = cfg.get('name', 'None')
+                trainable = cfg.get('trainable', False)
+                
+            if type(k)!=Model and type(k)!=Sequential:
+                print("{0:30} - {1:6} - {2:20} - {3:30}".format(name, trainable, str(k.input.get_shape()), str(k.output.get_shape())))
+            else:
+                for layer in k.layers:
+                    proc(layer)
+                    
+        print("{0:30} - {1:6} - {2:20} - {3:30}".format("Name", "Trainable", "Input", "Output"))
+        proc(model)
+
+    def precache_batch(self,  batch):
+        """ Process data for caching 
+            batch = Batch to be precached
+        """ 
+        print("Caching", batch.name)
+        processed = self._generate_precache_model(batch)
+    
+        batch._save_cached(data=processed['data'], labels=processed['labels'])       
+        return (processed['data'], processed['labels'])
+
+    ##########################################################
+    ## Checkpoints
+    def _restore_best_checkpoint(self):
+        """ Find best checkpoint, and restore to it """
+        self._cleanup_checkpoints()
         if len(self.checkpoint_data) == 0:
             print("No checkpoints found to restore")
             return
@@ -259,7 +310,8 @@ class Model1():
         self.model.load_weights(self.checkpoint_data[0]['filename'], by_name=True)
 #        self.model.load_weights(self.checkpoint_data[0]['filename'])
 
-    def cleanup_checkpoints(self):
+    def _cleanup_checkpoints(self):
+        """ Deletes >3 checkpoints, deletes unknown checkpoints, updates the file cache """
         checkpoints_to_keep = 3
         # Build index
         timestamp_index = {}
@@ -299,85 +351,40 @@ class Model1():
             print('Deleting inferior checkpoint', file_names[self.checkpoint_data[t]['timestamp']])
         del self.checkpoint_data[checkpoints_to_keep:]
 
-    def checkpoint_save(self, timestamp, val_loss):
+    def _checkpoint_save(self, timestamp, val_loss):
         fname = os.path.join(self.folder_model,'{0}_{1:.3f}.checkpoint'.format(timestamp,val_loss))
         fname = NU.get_filename(fname)
         print("Saving model checkpoint to", fname)
         self.model.save_weights(fname, overwrite=True)
-        self.cleanup_checkpoints()
+        self._cleanup_checkpoints()
 
-    def go_cached(self):
-        print("Using cached mode (skipping non-trainable steps)")
-        first_trainable = None
-        if self.model_trainable == None:
-            print("Trainable model not found. Building.")
-            mdl = Sequential()
-            for i in range(len(self.model.layers)):
-                if self.model.layers[i].trainable == True:
-                    if first_trainable is None:
-                        first_trainable = self.model.layers[i]
-                        mdl.add(Dropout(0, input_shape=(14,14,512)))
-                        mdl.add(self.model.layers[i])
-                    else:
-                        mdl.add(self.model.layers[i])
 
-            if first_trainable == None:
-                print("All layers non-trainable. Don't know what to cut. Exiting")
-                return
+    ##########################################################
+    ## Model creation
+    @staticmethod
+    def _vgg_preprocess(x):
+        # Preprocess images (RGB->BGR, subract means)
+        x = x - vgg_mean
+        return x[..., ::-1] # reverse axis rgb->bgr
 
-            self.model_trainable = mdl
-            self.model_trainable.compile(optimizer=Nadam(), loss='categorical_crossentropy', metrics=['accuracy'])
-            self.model_trainable.summary()
+    def create_model(self, class_num=2):
+        """Stick preprocessing, VGG16, and a custom top model together.
+        Args:
+            class_num(int) - number of classes to differentiate
+        Returns:
+            Sequential model
+        """
+        base_model = self._create_model_VGG16()
+        new_model = Sequential()
+        new_model.add(base_model)
+#        new_model.add(top_model)
+        new_model = self._flatten(new_model)
+        self._create_model_top(new_model, class_num=class_num)
+        self.model = new_model
+        self._restore_best_checkpoint()
+        self.summary()
 
-    def test(self, batch_valid):
-        if batch_valid.is_cached == True:
-            self.go_cached()
-            model = self.model_trainable
-        else:
-            model = self.model
-        ret = model.evaluate_generator(batch_valid.iter, batch_valid.step_count())
-        print("val_loss:{0:.4f}  val_acc:{1:.4f}".format(ret[0], ret[1]))
-        print(ret)
-
-    def flatten(self, model):
-        def proc(k, m2, override_trainable = True):
-            cfg = k.get_config()
-            trainable = True
-            if type(cfg) == dict:
-                name = cfg.get('name', 'None')
-                trainable = cfg.get('trainable', False)
-                
-            if type(k)!=Model and type(k)!=Sequential:
-                actual_trainable =  trainable & override_trainable
-#                print("{0:30} - {1} - {2}".format(name, trainable, actual_trainable))
-                k.trainable = actual_trainable
-                m2.add(k)
-            else:
-                for layer in k.layers:
-                    proc(layer, m2, trainable & override_trainable)
-                    
-        m2 = Sequential()
-        proc(model, m2)
-        return m2
-
-    def print_layers(self, model):
-        def proc(k):
-            cfg = k.get_config()
-            trainable = True
-            if type(cfg) == dict:
-                name = cfg.get('name', 'None')
-                trainable = cfg.get('trainable', False)
-                
-            if type(k)!=Model and type(k)!=Sequential:
-                print("{0:30} - {1:6} - {2:20} - {3:30}".format(name, trainable, str(k.input.get_shape()), str(k.output.get_shape())))
-            else:
-                for layer in k.layers:
-                    proc(layer)
-                    
-        print("{0:30} - {1:6} - {2:20} - {3:30}".format("Name", "Trainable", "Input", "Output"))
-        proc(model)
-
-    def create_model_VGG16(self):
+    def _create_model_VGG16(self):
         # Create a stock tf VGG16, prepended with an image processor
         vgg = VGG16(input_shape=(224,224,3), include_top=True, weights='imagenet')
         vgg.trainable = False
@@ -386,14 +393,14 @@ class Model1():
         vgg2 = Model(inputs=vgg.input, outputs=layer_block5_conv3.output)
 
         top_model = Sequential()
-        lbd = Lambda(self.vgg_preprocess,input_shape=(224,224,3),name="image_preprocess")
+        lbd = Lambda(self._vgg_preprocess,input_shape=(224,224,3),name="image_preprocess")
         lbd.trainable = False
         top_model.add(lbd)
         top_model.add(vgg2)
         top_model.layers[1].trainable=False
         return top_model
 
-    def add_conv_block(self, model_small, block_id, convolutions=512):
+    def _add_conv_block(self, model_small, block_id, convolutions=512):
         name="cblock_{0}".format(block_id)
         model_small.add(ZeroPadding2D((2,2), name=name+"_padding"))
         model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu', name=name+"_conv"))
@@ -401,10 +408,10 @@ class Model1():
         model_small.add(Dropout(0.5, name=name+"_dropout"))
         
 
-    def create_model_top(self, model, class_num=2):
+    def _create_model_top(self, model, class_num=2):
         # Fun bits. Sits on top of VGG16. This is where we play.
         for i in range(4):
-            self.add_conv_block(model, block_id=i)
+            self._add_conv_block(model, block_id=i)
         
         model.add(GlobalAveragePooling2D(name="top_global_average"))
         model.add(Dropout(0.2, name="top_dropout"))
@@ -418,24 +425,8 @@ class Model1():
         print('Non-trainable params: {:12,}'.format(non_trainable_count))
         print('Trainable params    : {:12,}'.format(trainable_count))
 
-    def create_model(self, class_num=2):
-        """Stick preprocessing, VGG16, and a custom top model together.
-        Args:
-            class_num(int) - number of classes to differentiate
-        Returns:
-            Sequential model
-        """
-        base_model = self.create_model_VGG16()
-        new_model = Sequential()
-        new_model.add(base_model)
-#        new_model.add(top_model)
-        new_model = self.flatten(new_model)
-        self.create_model_top(new_model, class_num=class_num)
-        self.model = new_model
-        self.restore_checkpoint()
-        self.summary()
-
-    ### Precaching. Start with precache_batch
+    ##########################################################
+    ## Precaching. Start with precache_batch
     def _generate_precache_model(self, batches):
         if self.model_nontrainable == None:      
             last_non_trainable = None
@@ -470,37 +461,57 @@ class Model1():
         print(y.shape)
         return {'data':y, 'labels':labels}
 
-    def precache_batch(self,  batch):
-        """ Process data for caching 
-            batch = Batch to be precached
-        """ 
-        print("Caching", batch.name)
-        processed = self._generate_precache_model(batch)
-    
-        batch._save_cached(data=processed['data'], labels=processed['labels'])       
-        return (processed['data'], processed['labels'])
+    def _go_cached(self):
+        """ Generate the model needed to use cached batches (i.e. drop the non-trainable steps) """
+        print("Using cached mode (skipping non-trainable steps)")
+        first_trainable = None
+        if self.model_trainable == None:
+            print("Trainable model not found. Building.")
+            mdl = Sequential()
+            for i in range(len(self.model.layers)):
+                if self.model.layers[i].trainable == True:
+                    if first_trainable is None:
+                        first_trainable = self.model.layers[i]
+                        mdl.add(Dropout(0, input_shape=(14,14,512)))
+                        mdl.add(self.model.layers[i])
+                    else:
+                        mdl.add(self.model.layers[i])
+
+            if first_trainable == None:
+                print("All layers non-trainable. Don't know what to cut. Exiting")
+                return
+
+            self.model_trainable = mdl
+            self.model_trainable.compile(optimizer=Nadam(), loss='categorical_crossentropy', metrics=['accuracy'])
+            self.model_trainable.summary()
+
+    ##########################################################
+    ## Utilities
+    def _save_state(self):
+        NU.save_object(self.file_history, self.history)
+
+    def _flatten(self, model):
+        def proc(k, m2, override_trainable = True):
+            cfg = k.get_config()
+            trainable = True
+            if type(cfg) == dict:
+                name = cfg.get('name', 'None')
+                trainable = cfg.get('trainable', False)
+                
+            if type(k)!=Model and type(k)!=Sequential:
+                actual_trainable =  trainable & override_trainable
+#                print("{0:30} - {1} - {2}".format(name, trainable, actual_trainable))
+                k.trainable = actual_trainable
+                m2.add(k)
+            else:
+                for layer in k.layers:
+                    proc(layer, m2, trainable & override_trainable)
+                    
+        m2 = Sequential()
+        proc(model, m2)
+        return m2
 
 
-    def compile(self):
-        self.model.compile(optimizer=Nadam(), loss='categorical_crossentropy', metrics=['accuracy'])
-#        self.model.compile(optimizer=Adam(lr=lr), loss='categorical_crossentropy', metrics=['accuracy'])
-        print("Model compiled")
-
-    def train(self, batch_train, batch_valid, callbacks=[], epochs=1):
-        if batch_valid.is_cached == True:
-            self.go_cached()
-            model = self.model_trainable
-        else:
-            model = self.model
-
-        callbacks = copy.copy(callbacks)
-        callbacks.append(self.callback)
-        self.cleanup_checkpoints()
-        ret = model.fit_generator(generator=batch_train.iter, steps_per_epoch=batch_train.step_count(), 
-                                 validation_data=batch_valid.iter, validation_steps=batch_valid.step_count(), 
-                                 callbacks=callbacks,
-                                 epochs=epochs)
-        return ret
  
 
 def save_array(fname, arr): 
