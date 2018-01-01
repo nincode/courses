@@ -107,7 +107,7 @@ class _CachedIterator(Iterator):
 
 class DataBatch():
     """ Abstracts loading batches from disk, handles cached and regular data """
-    def __init__(self, path, name, batch_size=default_batch_size, always_use_full_batch=False):
+    def __init__(self, path, name, batch_size=default_batch_size, always_use_full_batch=False, ignore_cached=False):
         """ Params:
             path                  - d:\temp\dogscats 
             name                  - train, valid, etc.
@@ -121,7 +121,7 @@ class DataBatch():
         self.is_cached = False
         if name == 'valid' and self.always_use_full_batch == False:
             print("You probably want always_use_full_batch=True on validation batches")
-        self._load()
+        self._load(ignore_cached)
 
     def _load_noncached(self):
         self.is_cached = False
@@ -148,14 +148,15 @@ class DataBatch():
         NU.save_array(os.path.join(self.path, "cached_"+self.name+"_data"), data)
         NU.save_array(os.path.join(self.path, "cached_"+self.name+"_labels"), labels)
 
-    def _load(self):
-        cached_name_data = os.path.join(self.path, "cached_"+self.name+"_data")
-        cached_name_labels = os.path.join(self.path, "cached_"+self.name+"_labels")
-        if os.path.exists(cached_name_data) and os.path.exists(cached_name_labels):
-            print("Found cached data",cached_name_data)
-            self._load_cached(cached_name_data, cached_name_labels)
-        else:
-            self._load_noncached()
+    def _load(self,ignore_cached):
+        if ignore_cached == False:
+            cached_name_data = os.path.join(self.path, "cached_"+self.name+"_data")
+            cached_name_labels = os.path.join(self.path, "cached_"+self.name+"_labels")
+            if os.path.exists(cached_name_data) and os.path.exists(cached_name_labels):
+                print("Found cached data",cached_name_data)
+                self._load_cached(cached_name_data, cached_name_labels)
+                return
+        self._load_noncached()
 
     def full_step_count(self):
         return int((self.iter.samples+self.iter.batch_size - 1)/self.batch_size)
@@ -403,7 +404,7 @@ class Model1():
     def _add_conv_block(self, model_small, block_id, convolutions=512):
         name="cblock_{0}".format(block_id)
         model_small.add(ZeroPadding2D((2,2), name=name+"_padding"))
-        model_small.add(Convolution2D(512, kernel_size=(5, 5), activation='relu', name=name+"_conv"))
+        model_small.add(Convolution2D(7, kernel_size=(5, 5), activation='relu', name=name+"_conv"))
         model_small.add(BatchNormalization(name=name+"_batchnorm"))
         model_small.add(Dropout(0.5, name=name+"_dropout"))
         
