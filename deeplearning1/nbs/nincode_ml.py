@@ -20,7 +20,7 @@ from tensorflow.python.keras.applications import VGG16
 from tensorflow.python.keras.models import Model
 from tensorflow.python.keras.models import Sequential, Model
 from tensorflow.python.keras._impl.keras.preprocessing.image import Iterator
-from tensorflow.python.keras.layers import Dense, Lambda, Dropout, BatchNormalization, ZeroPadding2D, Convolution2D, GlobalAveragePooling2D
+from tensorflow.python.keras.layers import Dense, Lambda, Dropout, BatchNormalization, ZeroPadding2D, Convolution2D, GlobalAveragePooling2D, GlobalMaxPooling2D
 from tensorflow.python.keras.optimizers import SGD, RMSprop, Adam, Nadam
 from tensorflow.python.keras.preprocessing import image
 from tensorflow.python.keras._impl.keras import callbacks as cbks
@@ -309,7 +309,6 @@ class Model1():
             return
         print("Restoring {0}, with loss {1:.3f}".format(self.checkpoint_data[0]['filename'], self.checkpoint_data[0]['val_loss']))
         self.model.load_weights(self.checkpoint_data[0]['filename'], by_name=True)
-#        self.model.load_weights(self.checkpoint_data[0]['filename'])
 
     def _cleanup_checkpoints(self):
         """ Deletes >3 checkpoints, deletes unknown checkpoints, updates the file cache """
@@ -378,7 +377,6 @@ class Model1():
         base_model = self._create_model_VGG16()
         new_model = Sequential()
         new_model.add(base_model)
-#        new_model.add(top_model)
         new_model = self._flatten(new_model)
         self._create_model_top(new_model, class_num=class_num)
         self.model = new_model
@@ -404,18 +402,23 @@ class Model1():
     def _add_conv_block(self, model_small, block_id, convolutions=512):
         name="cblock_{0}".format(block_id)
         model_small.add(ZeroPadding2D((2,2), name=name+"_padding"))
-        model_small.add(Convolution2D(7, kernel_size=(5, 5), activation='relu', name=name+"_conv"))
+        model_small.add(Convolution2D(convolutions, kernel_size=(5, 5), activation='relu', name=name+"_conv"))
         model_small.add(BatchNormalization(name=name+"_batchnorm"))
-        model_small.add(Dropout(0.5, name=name+"_dropout"))
+        if convolutions > 2:
+            # Don't add dropout to a single or binary convolutional layer
+            model_small.add(Dropout(0.3, name=name+"_dropout"))
         
 
     def _create_model_top(self, model, class_num=2):
         # Fun bits. Sits on top of VGG16. This is where we play.
-        for i in range(4):
-            self._add_conv_block(model, block_id=i)
+
+        for i in range(16):
+            self._add_conv_block(model, block_id=i, convolutions=16)
+
+        self._add_conv_block(model, block_id=1001, convolutions=2)
         
-        model.add(GlobalAveragePooling2D(name="top_global_average"))
-        model.add(Dropout(0.2, name="top_dropout"))
+        model.add(GlobalAveragePooling2D(name="top_global_avg"))
+#        model.add(Dropout(0.2, name="top_dropout"))
         model.add(Dense(class_num, activation='softmax', name="top_output"))
 
     def summary(self):
