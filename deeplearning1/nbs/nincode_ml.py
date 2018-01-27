@@ -94,8 +94,25 @@ class _CachedIterator(Iterator):
         super(_CachedIterator, self).__init__(self.samples, batch_size, True, 1)
     
     def next(self):
+        """For python 2.x.
+
+        Returns:
+            The next batch.
+        """
         with self.lock:
-              index_array, current_index, current_batch_size = next(self.index_generator)
+            index_array = next(self.index_generator)
+        # The transformation of images is not under thread lock
+        # so it can be done in parallel
+        return self._get_batches_of_transformed_samples(index_array)
+
+    def _get_batches_of_transformed_samples(self, index_array):
+        """Gets a batch of transformed samples.
+
+        Arguments:
+            index_array: array of sample indices to include in batch.
+        Returns:
+            A batch of transformed samples.
+        """
         batch_x = []
         batch_y = []
         for i, j in enumerate(index_array):
@@ -406,13 +423,13 @@ class Model1():
         model_small.add(BatchNormalization(name=name+"_batchnorm"))
         if convolutions > 2:
             # Don't add dropout to a single or binary convolutional layer
-            model_small.add(Dropout(0.3, name=name+"_dropout"))
+            model_small.add(Dropout(0.5, name=name+"_dropout"))
         
 
     def _create_model_top(self, model, class_num=2):
         # Fun bits. Sits on top of VGG16. This is where we play.
 
-        for i in range(16):
+        for i in range(4):
             self._add_conv_block(model, block_id=i, convolutions=16)
 
         self._add_conv_block(model, block_id=1001, convolutions=2)
